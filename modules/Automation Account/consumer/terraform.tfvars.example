@@ -1,0 +1,37 @@
+# Copy to an uncommitted environment tfvars file; replace every ****.
+subscription_id          = "****"
+tenant_id                = "****"
+resource_group_name      = "****"
+location                 = "****"
+approved_locations       = { eastus2 = "ue2", centralus = "uc1" } # Replace with the enterprise-approved catalog.
+owner                    = "****"
+appid                    = "****"
+context                  = "****"
+application_category     = "****"
+cost_centre              = "****"
+deployment_phase         = "integrated"
+pe_mode                  = "create"
+pe_subnet_id             = "****"
+pe_resource_group_name   = "****"
+pe_location              = "****"
+private_dns_zone_ids     = ["****"]
+lock_enabled             = false
+locks_managed_by_platform = false
+
+# Example definitions; do not enable these until matching values are injected.
+# automation_variables = {
+#   label    = { name = "WorkloadLabel", type = "string",   description = "Workload label" }
+#   attempts = { name = "RetryCount",    type = "int",      description = "Retry count" }
+#   enabled  = { name = "FeatureEnabled",type = "bool",     description = "Feature flag" }
+#   cutoff   = { name = "CutoffTime",    type = "datetime", description = "RFC3339 cutoff" }
+#   settings = { name = "Settings",      type = "object",   description = "Settings object" }
+# }
+# automation_credentials = {
+#   integration = { name = "IntegrationCredential", description = "Approved integration credential" }
+# }
+# Harness supplies TF_VAR_variable_values_json and TF_VAR_credential_values securely.
+# Each variable value is JSON-encoded, e.g. label = "\"payments\"", attempts = "3",
+# enabled = "true", cutoff = "\"2026-10-08T00:00:00Z\"", settings = "{\"retries\":3}".
+# For external networking: first phase=bootstrap (empty PE map), then create external
+# PE targeting output automation_account_id. Finally phase=integrated, pe_mode=existing,
+# existing_private_endpoint_id="****". Remove create-mode values or leave them unused.

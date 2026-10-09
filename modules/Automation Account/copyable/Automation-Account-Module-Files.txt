@@ -1,0 +1,553 @@
+# FILE: module/versions.tf
+terraform {
+  required_version = ">= 1.6.0, < 2.0.0"
+  required_providers {
+    azurerm = { source = "hashicorp/azurerm", version = "= 4.38.1" }
+    azapi   = { source = "Azure/azapi", version = "= 2.3.0" }
+  }
+}
+
+
+# FILE: module/variables.tf
+variable "expected_subscription_id" {
+  nullable = false
+  type     = string
+  validation {
+    condition     = can(regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", var.expected_subscription_id))
+    error_message = "Supply the approved subscription GUID."
+  }
+}
+variable "resource_group_name" {
+  nullable = false
+  type     = string
+  validation {
+    condition     = can(regex("^[A-Za-z0-9_.()-]{1,90}$", var.resource_group_name))
+    error_message = "Supply a valid existing resource group name."
+  }
+}
+variable "appname" {
+  nullable = false
+  type     = string
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9]{1,19}$", var.appname))
+    error_message = "appname must be 2–20 lowercase alphanumeric characters, starting with a letter."
+  }
+}
+variable "component" {
+  nullable = false
+  type     = string
+  default  = "automation"
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9]{0,14}$", var.component))
+    error_message = "component must be 1–15 lowercase alphanumeric characters, starting with a letter."
+  }
+}
+variable "instance_index" {
+  nullable = false
+  type     = string
+  default  = "01"
+  validation {
+    condition     = can(regex("^(0[1-9]|[1-9][0-9])$", var.instance_index))
+    error_message = "instance_index must be 01–99."
+  }
+}
+variable "appenv" {
+  nullable = false
+  type     = string
+  validation {
+    condition     = contains(["dev", "sit", "uat", "ppd", "prf", "prd"], var.appenv)
+    error_message = "Use dev, sit, uat, ppd, prf or prd."
+  }
+}
+variable "location" {
+  nullable = false
+  type     = string
+}
+variable "approved_locations" {
+  nullable    = false
+  description = "Platform-supplied Azure location to approved three-character region code catalog."
+  type        = map(string)
+  validation {
+    condition     = length(var.approved_locations) > 0 && alltrue([for k, v in var.approved_locations : can(regex("^[a-z0-9]{3}$", v)) && k == lower(replace(k, " ", ""))])
+    error_message = "Provide a reviewed location catalog with canonical location keys and three-character codes."
+  }
+}
+variable "owner" {
+  nullable = false
+  type     = string
+  validation {
+    condition     = length(trimspace(var.owner)) > 0
+    error_message = "owner is required."
+  }
+}
+variable "appid" {
+  nullable = false
+  type     = string
+  validation {
+    condition     = length(trimspace(var.appid)) > 0
+    error_message = "appid is required."
+  }
+}
+variable "context" {
+  nullable = false
+  type     = string
+  validation {
+    condition     = length(trimspace(var.context)) > 0
+    error_message = "context is required."
+  }
+}
+variable "application_category" {
+  nullable = false
+  type     = string
+  validation {
+    condition     = length(trimspace(var.application_category)) > 0
+    error_message = "application_category is required."
+  }
+}
+variable "tags" {
+  nullable    = false
+  description = "Additional tags, including a nonempty CostCentre; governed keys cannot be overridden."
+  type        = map(string)
+  default     = {}
+  validation {
+    condition     = alltrue([for k, v in var.tags : length(k) > 0 && length(k) <= 512 && length(v) > 0 && length(v) <= 256]) && length(distinct([for k in keys(var.tags) : lower(k)])) == length(var.tags)
+    error_message = "Tags must have nonempty valid lengths and no case-insensitive duplicate keys."
+  }
+}
+variable "deployment_phase" {
+  nullable    = false
+  description = "bootstrap creates only the account/assets before external networking; never represents accepted private integration."
+  type        = string
+  default     = "integrated"
+  validation {
+    condition     = contains(["bootstrap", "integrated"], var.deployment_phase)
+    error_message = "Use bootstrap or integrated."
+  }
+}
+variable "private_endpoints" {
+  nullable = false
+  type = map(object({
+    mode                         = string
+    subresource_name             = string
+    name                         = optional(string)
+    subnet_id                    = optional(string)
+    resource_group_name          = optional(string)
+    location                     = optional(string)
+    existing_private_endpoint_id = optional(string)
+    private_dns_zone_ids         = optional(set(string), [])
+  }))
+  default = {}
+  validation {
+    condition = alltrue([for k, p in var.private_endpoints :
+      can(regex("^[a-z][a-z0-9-]{0,19}$", k)) &&
+      contains(["create", "existing"], p.mode) &&
+      contains(["DSCAndHybridWorker", "Webhook"], p.subresource_name) &&
+      length(p.private_dns_zone_ids) > 0 &&
+      alltrue([for id in p.private_dns_zone_ids : can(regex("(?i)^/subscriptions/[0-9a-f-]{36}/resourceGroups/[^/]+/providers/Microsoft.Network/privateDnsZones/privatelink\\.azure-automation\\.net$", id))]) &&
+      (p.mode == "create" ? (
+        p.existing_private_endpoint_id == null &&
+        can(regex("(?i)^/subscriptions/[0-9a-f-]{36}/resourceGroups/[^/]+/providers/Microsoft.Network/virtualNetworks/[^/]+/subnets/[^/]+$", p.subnet_id)) &&
+        try(length(trimspace(p.resource_group_name)) > 0, false) &&
+        try(length(trimspace(p.location)) > 0, false) &&
+        (p.name == null ? true : can(regex("^[A-Za-z0-9][A-Za-z0-9_.-]{0,78}[A-Za-z0-9_]$", p.name)))
+        ) : (
+        p.subnet_id == null && p.resource_group_name == null && p.location == null && p.name == null &&
+        can(regex("(?i)^/subscriptions/[0-9a-f-]{36}/resourceGroups/[^/]+/providers/Microsoft.Network/privateEndpoints/[^/]+$", p.existing_private_endpoint_id))
+      ))
+    ])
+    error_message = "Each PE needs create/existing mode, an approved Automation subresource and expected existing DNS zone IDs; supply only the fields appropriate to its mode."
+  }
+}
+variable "automation_variables" {
+  nullable    = false
+  description = "Non-secret definitions; keys select matching JSON-encoded sensitive values."
+  type        = map(object({ name = string, type = string, description = string }))
+  default     = {}
+  validation {
+    condition     = alltrue([for k, v in var.automation_variables : can(regex("^[A-Za-z][A-Za-z0-9_-]{0,127}$", v.name)) && contains(["string", "int", "bool", "datetime", "object"], v.type) && length(trimspace(v.description)) > 0]) && length(distinct([for v in values(var.automation_variables) : lower(v.name)])) == length(var.automation_variables)
+    error_message = "Variables need valid names, explicit supported types, descriptions and case-insensitive uniqueness across all types."
+  }
+}
+variable "variable_values_json" {
+  nullable    = false
+  description = "JSON encoding of each value, keyed exactly like automation_variables. Pipeline injects secrets; values enter state."
+  type        = map(string)
+  sensitive   = true
+  default     = {}
+}
+variable "automation_credentials" {
+  nullable = false
+  type     = map(object({ name = string, description = string }))
+  default  = {}
+  validation {
+    condition     = alltrue([for c in values(var.automation_credentials) : can(regex("^[A-Za-z][A-Za-z0-9_-]{0,127}$", c.name)) && length(trimspace(c.description)) > 0]) && length(distinct([for c in values(var.automation_credentials) : lower(c.name)])) == length(var.automation_credentials)
+    error_message = "Credentials need valid names, descriptions and case-insensitive uniqueness."
+  }
+}
+variable "credential_values" {
+  nullable  = false
+  type      = map(object({ username = string, password = string }))
+  sensitive = true
+  default   = {}
+}
+variable "customer_managed_key_id" {
+  description = "Optional existing versioned Key Vault key URI. System identity must already have approved key access; configure only after account-first/RBAC deployment. Null uses service-managed encryption."
+  type        = string
+  default     = null
+  validation {
+    condition     = var.customer_managed_key_id == null ? true : can(regex("^https://[A-Za-z0-9-]+\\.vault\\.azure\\.net/keys/[^/]+/[^/]+$", var.customer_managed_key_id))
+    error_message = "CMK must be an existing versioned Azure Key Vault key URI."
+  }
+}
+variable "lock_enabled" {
+  nullable = false
+  type     = bool
+  default  = false
+}
+variable "locks_managed_by_platform" {
+  nullable = false
+  type     = bool
+  default  = false
+}
+variable "governance_lock_ids" {
+  nullable = false
+  type     = set(string)
+  default  = []
+  validation {
+    condition     = alltrue([for id in var.governance_lock_ids : can(regex("(?i)^/subscriptions/[0-9a-f-]{36}(/resourceGroups/[^/]+(/providers/Microsoft.Automation/automationAccounts/[^/]+)?)?/providers/Microsoft.Authorization/locks/[^/]+$", id))])
+    error_message = "Supply subscription, resource-group or Automation Account management-lock IDs."
+  }
+}
+variable "rbac_dependencies" {
+  nullable    = false
+  description = "Optional existing deployment assignment references. Metadata verification does not prove effective access or ABAC."
+  type        = map(object({ assignment_id = string, principal_id = string, scope = string, role_definition_id = string }))
+  default     = {}
+  validation {
+    condition     = alltrue([for r in values(var.rbac_dependencies) : can(regex("(?i)^/.+/providers/Microsoft.Authorization/roleAssignments/[0-9a-f-]{36}$", r.assignment_id)) && can(regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", r.principal_id)) && startswith(lower(r.scope), "/subscriptions/") && can(regex("(?i)/providers/Microsoft.Authorization/roleDefinitions/[0-9a-f-]{36}$", r.role_definition_id))])
+    error_message = "Supply valid existing RBAC assignment, principal, scope and role-definition references."
+  }
+}
+variable "timeouts" {
+  nullable = false
+  type     = object({ create = optional(string, "30m"), read = optional(string, "5m"), update = optional(string, "30m"), delete = optional(string, "30m") })
+  default  = {}
+  validation {
+    condition     = alltrue([for t in values(var.timeouts) : can(regex("^[1-9][0-9]*[mh]$", t))])
+    error_message = "Timeouts must be positive whole-minute/hour durations, e.g. 30m."
+  }
+}
+
+
+# FILE: module/locals.tf
+locals {
+  location     = lower(replace(var.location, " ", ""))
+  region_code  = lookup(var.approved_locations, local.location, "invalid")
+  account_name = "aa-${var.appname}-${var.component}-${var.instance_index}-${var.appenv}-${local.region_code}"
+  subscription_tags = {
+    for k, v in data.azurerm_subscription.current.tags : k => v if startswith(lower(k), "global-")
+  }
+  governed_tags = merge(local.subscription_tags, {
+    Application = var.appname, ApplicationId = var.appid, Environment = var.appenv,
+    Owner       = var.owner, Context = var.context, ApplicationCategory = var.application_category
+  })
+  effective_tags = merge(var.tags, local.governed_tags)
+  create_pe      = { for k, p in var.private_endpoints : k => p if p.mode == "create" }
+  existing_pe    = { for k, p in var.private_endpoints : k => p if p.mode == "existing" }
+  decoded_values = { for k in keys(var.automation_variables) : k => try(jsondecode(var.variable_values_json[k]), null) }
+  values_valid = alltrue([for k, d in var.automation_variables : try(
+    d.type == "string" ? startswith(trimspace(var.variable_values_json[k]), "\"") :
+    d.type == "bool" ? contains(["true", "false"], trimspace(var.variable_values_json[k])) :
+    d.type == "int" ? (can(regex("^-?(0|[1-9][0-9]*)$", trimspace(var.variable_values_json[k]))) && local.decoded_values[k] >= -2147483648 && local.decoded_values[k] <= 2147483647) :
+    d.type == "datetime" ? (startswith(trimspace(var.variable_values_json[k]), "\"") && can(formatdate("YYYY", local.decoded_values[k]))) :
+    d.type == "object" ? startswith(trimspace(var.variable_values_json[k]), "{") : false,
+    false
+  ) && can(jsondecode(lookup(var.variable_values_json, k, "")))])
+  endpoints = merge(
+    { for k, p in azurerm_private_endpoint.this : k => p.id },
+    { for k, p in local.existing_pe : k => p.existing_private_endpoint_id }
+  )
+}
+
+
+# FILE: module/data.tf
+data "azurerm_client_config" "current" {}
+data "azurerm_subscription" "current" {}
+data "azurerm_resource_group" "account" { name = var.resource_group_name }
+
+data "azapi_resource" "subnet" {
+  for_each               = local.create_pe
+  type                   = "Microsoft.Network/virtualNetworks/subnets@2023-11-01"
+  resource_id            = each.value.subnet_id
+  response_export_values = ["id"]
+}
+data "azapi_resource" "dns_zone" {
+  for_each               = toset(flatten([for p in values(var.private_endpoints) : tolist(p.private_dns_zone_ids)]))
+  type                   = "Microsoft.Network/privateDnsZones@2020-06-01"
+  resource_id            = each.value
+  response_export_values = ["id", "name"]
+}
+data "azapi_resource" "rbac" {
+  for_each               = var.rbac_dependencies
+  type                   = "Microsoft.Authorization/roleAssignments@2022-04-01"
+  resource_id            = each.value.assignment_id
+  response_export_values = ["properties"]
+  lifecycle {
+    postcondition {
+      condition     = lower(self.output.properties.principalId) == lower(each.value.principal_id) && lower(self.output.properties.scope) == lower(each.value.scope) && lower(self.output.properties.roleDefinitionId) == lower(each.value.role_definition_id)
+      error_message = "Referenced RBAC assignment does not match its declared principal, scope or role."
+    }
+  }
+}
+# Read the actual PE ARM metadata; never adopt an external PE as a managed resource.
+data "azapi_resource" "endpoint" {
+  for_each               = var.private_endpoints
+  type                   = "Microsoft.Network/privateEndpoints@2023-11-01"
+  resource_id            = local.endpoints[each.key]
+  response_export_values = ["properties.provisioningState", "properties.privateLinkServiceConnections", "properties.manualPrivateLinkServiceConnections", "properties.customDnsConfigs", "properties.networkInterfaces"]
+  depends_on             = [azurerm_automation_account.this, azurerm_private_endpoint.this]
+  lifecycle {
+    postcondition {
+      condition     = try(self.output.properties.provisioningState == "Succeeded", false)
+      error_message = "PE provisioning has not succeeded."
+    }
+    postcondition {
+      condition = anytrue([for c in concat(try(self.output.properties.privateLinkServiceConnections, []), try(self.output.properties.manualPrivateLinkServiceConnections, [])) :
+        try(lower(c.properties.privateLinkServiceId) == lower(azurerm_automation_account.this.id) && contains(c.properties.groupIds, each.value.subresource_name) && c.properties.privateLinkServiceConnectionState.status == "Approved", false)
+      ])
+      error_message = "PE must have an Approved connection to this account and the requested Automation subresource."
+    }
+  }
+}
+data "azapi_resource_list" "dns_groups" {
+  for_each               = var.private_endpoints
+  type                   = "Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2023-11-01"
+  parent_id              = local.endpoints[each.key]
+  response_export_values = ["value"]
+  depends_on             = [data.azapi_resource.endpoint]
+  lifecycle {
+    postcondition {
+      condition = alltrue([for zone in each.value.private_dns_zone_ids : contains(
+        flatten([for group in try(self.output.value, []) : [for config in try(group.properties.privateDnsZoneConfigs, []) : lower(config.properties.privateDnsZoneId)]]), lower(zone)
+      )])
+      error_message = "PE does not have the required private DNS zone association."
+    }
+  }
+}
+data "azapi_resource" "platform_lock" {
+  for_each               = var.governance_lock_ids
+  type                   = "Microsoft.Authorization/locks@2016-09-01"
+  resource_id            = each.value
+  response_export_values = ["properties.level"]
+  depends_on             = [azurerm_automation_account.this]
+  lifecycle {
+    postcondition {
+      condition = contains(["CanNotDelete", "ReadOnly"], self.output.properties.level) && contains([
+        lower(azurerm_automation_account.this.id), lower(data.azurerm_resource_group.account.id),
+        "/subscriptions/${lower(var.expected_subscription_id)}"
+      ], split("/providers/microsoft.authorization/locks/", lower(each.value))[0])
+      error_message = "Platform lock must exist at the account, its resource group or subscription scope."
+    }
+  }
+}
+
+
+# FILE: module/main.tf
+resource "azurerm_automation_account" "this" {
+  name                          = local.account_name
+  resource_group_name           = data.azurerm_resource_group.account.name
+  location                      = local.location
+  sku_name                      = "Basic"
+  public_network_access_enabled = false
+  local_authentication_enabled  = false
+  tags                          = local.effective_tags
+  identity { type = "SystemAssigned" }
+  dynamic "encryption" {
+    for_each = var.customer_managed_key_id == null ? [] : [var.customer_managed_key_id]
+    content { key_vault_key_id = encryption.value }
+  }
+  timeouts {
+    create = var.timeouts.create
+    read   = var.timeouts.read
+    update = var.timeouts.update
+    delete = var.timeouts.delete
+  }
+  depends_on = [data.azapi_resource.rbac]
+  lifecycle {
+    precondition {
+      condition     = lower(data.azurerm_client_config.current.subscription_id) == lower(var.expected_subscription_id)
+      error_message = "Provider subscription differs from expected_subscription_id."
+    }
+    precondition {
+      condition     = contains(keys(var.approved_locations), local.location) && can(regex("^[a-z][a-z0-9-]{4,48}[a-z0-9]$", local.account_name))
+      error_message = "Location is unapproved or generated account name violates the 6–50-character naming contract."
+    }
+    precondition {
+      condition     = length(local.subscription_tags) > 0 && alltrue([for v in values(local.subscription_tags) : length(trimspace(v)) > 0])
+      error_message = "Subscription needs nonempty governed global-* tags."
+    }
+    precondition {
+      condition     = length(distinct([for k in keys(local.governed_tags) : lower(k)])) == length(local.governed_tags) && length(setintersection(toset([for k in keys(var.tags) : lower(k)]), toset([for k in keys(local.governed_tags) : lower(k)]))) == 0 && try(length(trimspace(var.tags["CostCentre"])) > 0, false) && length(local.effective_tags) <= 50 && alltrue([for k, v in local.effective_tags : length(k) <= 512 && length(v) <= 256])
+      error_message = "Supply CostCentre; do not override governed tags, duplicate tag keys by case, or exceed 50 tags."
+    }
+    precondition {
+      condition     = var.deployment_phase == "integrated" ? length(var.private_endpoints) > 0 : length(var.private_endpoints) == 0
+      error_message = "integrated requires PE entries; bootstrap is an explicit account-only stage with no PE entries."
+    }
+    precondition {
+      condition     = !(var.lock_enabled && var.locks_managed_by_platform) && (!var.locks_managed_by_platform || length(var.governance_lock_ids) > 0)
+      error_message = "Do not duplicate platform locks; provide their references when platform lock ownership is selected."
+    }
+    precondition {
+      condition     = nonsensitive(toset(keys(var.variable_values_json))) == toset(keys(var.automation_variables)) && local.values_valid
+      error_message = "Variable values must match definition keys and JSON types (int32, RFC3339 datetime, JSON object); values are not included in this error."
+    }
+    precondition {
+      condition     = nonsensitive(toset(keys(var.credential_values))) == toset(keys(var.automation_credentials)) && alltrue([for c in values(var.credential_values) : length(trimspace(c.username)) > 0 && length(trimspace(c.password)) > 0 && trimspace(c.password) != "****"])
+      error_message = "Supply exactly matching credential keys with nonempty usernames/passwords, not placeholder passwords."
+    }
+  }
+}
+resource "azurerm_private_endpoint" "this" {
+  for_each            = local.create_pe
+  name                = coalesce(each.value.name, "pe-${local.account_name}-${each.key}")
+  resource_group_name = each.value.resource_group_name
+  location            = each.value.location
+  subnet_id           = data.azapi_resource.subnet[each.key].id
+  tags                = local.effective_tags
+  private_service_connection {
+    name                           = "psc-${each.key}"
+    private_connection_resource_id = azurerm_automation_account.this.id
+    subresource_names              = [each.value.subresource_name]
+    is_manual_connection           = false
+  }
+  private_dns_zone_group {
+    name                 = "automation"
+    private_dns_zone_ids = [for id in each.value.private_dns_zone_ids : data.azapi_resource.dns_zone[id].id]
+  }
+}
+resource "azurerm_automation_variable_string" "this" {
+  for_each                = { for k, v in var.automation_variables : k => v if v.type == "string" }
+  name                    = each.value.name
+  description             = each.value.description
+  resource_group_name     = azurerm_automation_account.this.resource_group_name
+  automation_account_name = azurerm_automation_account.this.name
+  encrypted               = true
+  value                   = try(local.decoded_values[each.key], "")
+}
+resource "azurerm_automation_variable_int" "this" {
+  for_each                = { for k, v in var.automation_variables : k => v if v.type == "int" }
+  name                    = each.value.name
+  description             = each.value.description
+  resource_group_name     = azurerm_automation_account.this.resource_group_name
+  automation_account_name = azurerm_automation_account.this.name
+  encrypted               = true
+  value                   = try(tonumber(local.decoded_values[each.key]), 0)
+}
+resource "azurerm_automation_variable_bool" "this" {
+  for_each                = { for k, v in var.automation_variables : k => v if v.type == "bool" }
+  name                    = each.value.name
+  description             = each.value.description
+  resource_group_name     = azurerm_automation_account.this.resource_group_name
+  automation_account_name = azurerm_automation_account.this.name
+  encrypted               = true
+  value                   = try(tobool(local.decoded_values[each.key]), false)
+}
+resource "azurerm_automation_variable_datetime" "this" {
+  for_each                = { for k, v in var.automation_variables : k => v if v.type == "datetime" }
+  name                    = each.value.name
+  description             = each.value.description
+  resource_group_name     = azurerm_automation_account.this.resource_group_name
+  automation_account_name = azurerm_automation_account.this.name
+  encrypted               = true
+  value                   = try(local.decoded_values[each.key], "2000-01-01T00:00:00Z")
+}
+resource "azurerm_automation_variable_object" "this" {
+  for_each                = { for k, v in var.automation_variables : k => v if v.type == "object" }
+  name                    = each.value.name
+  description             = each.value.description
+  resource_group_name     = azurerm_automation_account.this.resource_group_name
+  automation_account_name = azurerm_automation_account.this.name
+  encrypted               = true
+  value                   = try(jsonencode(local.decoded_values[each.key]), "{}")
+}
+resource "azurerm_automation_credential" "this" {
+  for_each                = var.automation_credentials
+  name                    = each.value.name
+  description             = each.value.description
+  resource_group_name     = azurerm_automation_account.this.resource_group_name
+  automation_account_name = azurerm_automation_account.this.name
+  username                = try(var.credential_values[each.key].username, "")
+  password                = try(var.credential_values[each.key].password, "")
+}
+# Remove this lock in a separate reviewed apply before destroying the account.
+resource "azurerm_management_lock" "this" {
+  count      = var.lock_enabled ? 1 : 0
+  name       = "automation-account-delete-protection"
+  scope      = azurerm_automation_account.this.id
+  lock_level = "CanNotDelete"
+  notes      = "Managed by the account module; coordinate removal with dependency owners."
+  depends_on = [azurerm_automation_variable_string.this, azurerm_automation_variable_int.this, azurerm_automation_variable_bool.this, azurerm_automation_variable_datetime.this, azurerm_automation_variable_object.this, azurerm_automation_credential.this, data.azapi_resource_list.dns_groups]
+}
+
+
+# FILE: module/outputs.tf
+output "automation_account_id" { value = azurerm_automation_account.this.id }
+output "automation_account_name" { value = azurerm_automation_account.this.name }
+output "account" {
+  value = {
+    id                            = azurerm_automation_account.this.id, name = azurerm_automation_account.this.name,
+    subscription_id               = data.azurerm_client_config.current.subscription_id,
+    resource_group_name           = azurerm_automation_account.this.resource_group_name,
+    location                      = local.location, region_code = local.region_code, appenv = var.appenv,
+    sku                           = "Basic", tags = local.effective_tags, created = true,
+    public_network_access_enabled = false, local_authentication_enabled = false,
+    encryption_mode               = var.customer_managed_key_id == null ? "ServiceManaged" : "CustomerManaged"
+  }
+}
+output "identity" {
+  value = {
+    type                = "SystemAssigned", principal_id = azurerm_automation_account.this.identity[0].principal_id,
+    tenant_id           = azurerm_automation_account.this.identity[0].tenant_id,
+    account_resource_id = azurerm_automation_account.this.id
+  }
+}
+output "variables" {
+  value = { for k, d in var.automation_variables : k => {
+    id   = merge(azurerm_automation_variable_string.this, azurerm_automation_variable_int.this, azurerm_automation_variable_bool.this, azurerm_automation_variable_datetime.this, azurerm_automation_variable_object.this)[k].id,
+    name = d.name, type = d.type, encrypted = true, created = true
+  } }
+}
+output "credentials" {
+  value = { for k, d in var.automation_credentials : k => {
+    id = azurerm_automation_credential.this[k].id, name = d.name, type = "PSCredential", created = true
+  } }
+}
+output "private_endpoints" {
+  value = { for k, p in var.private_endpoints : k => {
+    id                    = local.endpoints[k], target_id = azurerm_automation_account.this.id,
+    mode                  = p.mode, created = p.mode == "create", subresource = p.subresource_name,
+    expected_dns_zone_ids = p.private_dns_zone_ids,
+    provisioning_state    = data.azapi_resource.endpoint[k].output.properties.provisioningState,
+    connections           = concat(try(data.azapi_resource.endpoint[k].output.properties.privateLinkServiceConnections, []), try(data.azapi_resource.endpoint[k].output.properties.manualPrivateLinkServiceConnections, [])),
+    dns_configs           = try(data.azapi_resource.endpoint[k].output.properties.customDnsConfigs, []),
+    dns_zone_groups       = try(data.azapi_resource_list.dns_groups[k].output.value, [])
+  } }
+  depends_on = [data.azapi_resource.endpoint, data.azapi_resource_list.dns_groups]
+}
+output "integration_status" {
+  value = {
+    phase                              = var.deployment_phase,
+    private_endpoint_metadata_verified = var.deployment_phase == "integrated",
+    dns_connectivity_acceptance        = "Requires separate QA test from the approved private execution network"
+  }
+  depends_on = [data.azapi_resource.endpoint, data.azapi_resource_list.dns_groups]
+}
+output "governance" {
+  value = {
+    owner             = var.owner,
+    module_lock_id    = try(azurerm_management_lock.this[0].id, null),
+    external_lock_ids = var.governance_lock_ids,
+    rbac_dependencies = var.rbac_dependencies
+  }
+}

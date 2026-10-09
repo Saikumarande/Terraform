@@ -1,0 +1,6 @@
+# Pass with init -backend-config=backend.hcl. Authenticate via your approved pipeline.
+resource_group_name  = "****"
+storage_account_name = "****"
+container_name       = "****"
+key                  = "automation-account/dev.tfstate"
+use_azuread_auth     = true
